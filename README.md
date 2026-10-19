@@ -1,27 +1,28 @@
 # BrowserDock
 
-**A self-hosted Chromium automation gateway with secure defaults and an MIT license.**
+**Self-hosted headless browsers as a service, with secure defaults and an MIT license.**
 
-BrowserDock turns a local headless Chromium browser into a small HTTP service. Send a URL and
-get back rendered page content, a screenshot, or a PDF. It is designed for developers who want
-the browser on their own machine or server without a hosted account, usage meter, or proprietary
-license.
+BrowserDock runs headless Chromium on your own machine or server and offers it two ways:
+
+- **Live sessions.** Create a browser with one API call and drive it remotely from Playwright,
+  Puppeteer or any Chrome DevTools Protocol (CDP) client, the same way you would use a hosted
+  browser service.
+- **One-shot rendering.** Send a URL and get back rendered page content, a screenshot or a PDF.
 
 ## Why BrowserDock
 
 - **Permissive MIT license.** Use it in personal, open-source, or commercial projects.
-- **Safe by default.** It binds to localhost, generates an API key at startup, blocks private and
-  link-local network targets, and limits concurrency and request time.
-- **Isolated requests.** Every API call gets a fresh browser context; cookies and storage do not
-  carry over.
-- **Simple interface.** Three documented HTTP endpoints work from curl, Python, or any backend.
-- **No arbitrary-code endpoint.** BrowserDock accepts a URL and bounded options; it never runs
-  JavaScript supplied in the request body.
+- **Safe by default.** It binds to localhost, generates an API key at startup, and limits concurrent
+  browsers, session length and request time.
+- **SSRF protection on every hop.** All browser traffic passes through a built-in egress proxy that
+  blocks private, loopback, link-local and cloud-metadata addresses, including after redirects and
+  for requests made by page scripts.
+- **Isolated browsers.** Each live session is its own Chromium process with a throwaway profile, and
+  each render request gets a fresh browser context.
+- **Usage metering.** Concurrent sessions and browser-hours are tracked and exposed at `/v1/usage`.
 
-BrowserDock is deliberately a small, single-browser gateway. It does not provide Browserless's
-Playwright/Puppeteer WebSocket protocol, Firefox/WebKit/Edge, stealth, CAPTCHA solving, persistent
-profiles, crawling, or hosted cloud service. It is a better fit when a small, permissively licensed
-local service and restrictive defaults matter more than those features.
+BrowserDock is deliberately small. It supports Chromium only and does not do stealth
+fingerprinting, CAPTCHA solving, residential proxies, persistent profiles or crawling.
 
 ## Quick start with Docker
 
@@ -43,7 +44,7 @@ curl http://127.0.0.1:3000/healthz
 
 The health endpoint is public and returns only status and version.
 
-## API
+## Rendering API
 
 Pass the key with `Authorization: Bearer YOUR_KEY` or `X-API-Key: YOUR_KEY`.
 
@@ -84,9 +85,69 @@ curl http://127.0.0.1:3000/v1/pdf \
 Options: `format` (`A4`, `A3`, `A5`, `Letter`, `Legal`, or `Tabloid`), `landscape`, and
 `printBackground`.
 
-All three endpoints accept `timeoutMs` (default 15 seconds, maximum 30 seconds by default) and
+All three rendering endpoints accept `timeoutMs` (default 15 seconds, maximum 30 seconds by default) and
 `waitUntil` (`domcontentloaded`, `load`, or `networkidle`). The service rejects work above its
 concurrency limit with HTTP 429. `GET /v1/capabilities` lists the running API version and routes.
+
+## Live browser sessions
+
+A session is a dedicated Chromium process that you control over CDP. Create one, connect with your
+automation library, and the session ends when you disconnect (or at its timeout).
+
+```bash
+curl -X POST http://127.0.0.1:3000/v1/sessions \
+  -H 'Authorization: Bearer YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"timeoutSeconds": 600}'
+```
+
+```json
+{
+  "id": "6f1c…",
+  "status": "running",
+  "keepAlive": false,
+  "createdAt": "2026-10-19T12:00:00.000Z",
+  "expiresAt": "2026-10-19T12:10:00.000Z",
+  "durationMs": 212,
+  "connectUrl": "ws://127.0.0.1:3000/v1/sessions/6f1c…/connect?token=…"
+}
+```
+
+Connect with Playwright:
+
+```js
+import { chromium } from "playwright";
+
+const session = await fetch("http://127.0.0.1:3000/v1/sessions", {
+  method: "POST",
+  headers: { Authorization: `Bearer ${process.env.BROWSERDOCK_API_KEY}` },
+}).then((response) => response.json());
+
+const browser = await chromium.connectOverCDP(session.connectUrl);
+const page = await (await browser.newContext()).newPage();
+await page.goto("https://example.com");
+console.log(await page.title());
+await browser.close(); // ends the session
+```
+
+Or Puppeteer: `await puppeteer.connect({ browserWSEndpoint: session.connectUrl })`.
+
+| Request | Purpose |
+|---|---|
+| `POST /v1/sessions` | Start a session. Options: `timeoutSeconds` (5 to the server maximum) and `keepAlive` (keep running after the client disconnects, until timeout or delete). |
+| `GET /v1/sessions` | List running sessions. |
+| `GET /v1/sessions/{id}` | Session status, timing and close reason. |
+| `DELETE /v1/sessions/{id}` | Stop a session and its browser. |
+| `GET /v1/usage` | Active and total sessions and browser-hours since the server started. |
+
+The `connectUrl` contains a per-session token, so treat it like a password. One client can be
+connected to a session at a time. Behind a reverse proxy, set `BROWSERDOCK_PUBLIC_URL` so connect
+URLs use your public address (`https://` becomes `wss://`).
+
+Sessions give the client full control of its own browser, with a few limits that protect the
+server: downloads are denied, and CDP commands that would read server files, load extensions,
+open ports, change the browser's proxy or navigate to non-web URLs (`file:`, `chrome:`) are
+rejected.
 
 ## Run without Docker
 
@@ -116,6 +177,11 @@ PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium npm start
 | `BROWSERDOCK_MAX_CONCURRENT` | `3` | Maximum simultaneous browser contexts; range 1–64. |
 | `BROWSERDOCK_MAX_TIMEOUT_MS` | `30000` | Maximum allowed request timeout; range 1,000–120,000 ms. |
 | `BROWSERDOCK_ALLOW_PRIVATE_NETWORKS` | `false` | Development-only opt-in for local targets. Keep disabled in production. |
+| `BROWSERDOCK_MAX_SESSIONS` | `3` | Maximum live sessions at once; range 0–256. `0` disables sessions. |
+| `BROWSERDOCK_SESSION_TIMEOUT_SECONDS` | `900` | Default session length when a request does not set `timeoutSeconds`. |
+| `BROWSERDOCK_MAX_SESSION_TIMEOUT_SECONDS` | `3600` | Longest session a client may request; range 5–86,400. |
+| `BROWSERDOCK_PUBLIC_URL` | derived from the request | Public base URL used in session `connectUrl`s. |
+| `BROWSERDOCK_CHROMIUM_SANDBOX` | `false` | Run session browsers with Chromium's sandbox. Needs a host or container that supports it. |
 | `BROWSERDOCK_LOG_LEVEL` | `info` | Set to `silent` to disable request summaries. URLs and secrets are never logged. |
 
 ## Security notes
@@ -145,8 +211,18 @@ npm run typecheck
 npm test
 ```
 
-Tests launch a local Chromium build and exercise real content, screenshot, and PDF requests against
-a local fixture page. No third-party site or API is contacted by the test suite.
+Tests launch a local Chromium build and exercise real rendering requests and live sessions (driven
+by Playwright over CDP) against local fixture pages, including redirect and CDP-filter attacks. No third-party site or API is contacted by the test suite.
+
+## Self-hosted and hosted
+
+BrowserDock is open core. Everything in this repository, including live sessions, limits and usage
+metering, is MIT-licensed and free to run yourself. A hosted BrowserDock service with accounts,
+plans and billing is planned as a separate offering on top of it.
+
+If you run BrowserDock as a service for other people, give each customer their own deployment or
+put each session in its own container or VM with network egress rules. The built-in limits and CDP
+filter protect a single trusted operator's server; they are not a substitute for tenant isolation.
 
 ## License
 

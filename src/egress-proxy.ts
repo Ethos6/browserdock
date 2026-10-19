@@ -23,12 +23,19 @@ export class EgressProxy {
   readonly password = randomBytes(24).toString("base64url");
   private readonly expectedAuth: Buffer;
   private readonly policy: AddressPolicy;
+  private readonly requireAuth: boolean;
   private readonly sockets = new Set<Socket | Duplex>();
   private server?: Server;
   private serverUrl?: string;
 
-  constructor(policy: AddressPolicy = publicAddressPolicy) {
+  /**
+   * @param requireAuth Set to false for browsers launched with --proxy-server, which cannot
+   *   pass proxy credentials. The proxy still listens only on loopback and only reaches
+   *   addresses the policy allows.
+   */
+  constructor(policy: AddressPolicy = publicAddressPolicy, options: { requireAuth?: boolean } = {}) {
     this.policy = policy;
+    this.requireAuth = options.requireAuth ?? true;
     this.expectedAuth = Buffer.from(
       "Basic " + Buffer.from(`${this.username}:${this.password}`).toString("base64"),
     );
@@ -64,6 +71,7 @@ export class EgressProxy {
   }
 
   private authorized(req: IncomingMessage): boolean {
+    if (!this.requireAuth) return true;
     const header = req.headers["proxy-authorization"];
     if (typeof header !== "string") return false;
     const candidate = Buffer.from(header);

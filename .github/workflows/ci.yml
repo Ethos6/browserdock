@@ -18,4 +18,11 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: docker build --tag browserdock:ci .
+      - name: Smoke-test the container
+        env:
+          BROWSERDOCK_API_KEY: ci-smoke-key-0123456789abcdef
+        run: |
+          docker run --detach --name browserdock --init --shm-size 1g \
+            --publish 127.0.0.1:3000:3000 --env BROWSERDOCK_API_KEY browserdock:ci
+          node scripts/docker-smoke.mjs || { docker logs browserdock; exit 1; }
 

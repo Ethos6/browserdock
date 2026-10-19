@@ -11,5 +11,9 @@ services:
       BROWSERDOCK_PORT: 3000
       BROWSERDOCK_MAX_CONCURRENT: 3
       BROWSERDOCK_MAX_TIMEOUT_MS: 30000
+      BROWSERDOCK_MAX_SESSIONS: 3
+      BROWSERDOCK_SESSION_TIMEOUT_SECONDS: 900
+      # Set when clients reach BrowserDock through a reverse proxy, for example:
+      # BROWSERDOCK_PUBLIC_URL: https://browsers.example.com
       # Set a long random key before exposing this service beyond localhost.
       # BROWSERDOCK_API_KEY: change-this-secret

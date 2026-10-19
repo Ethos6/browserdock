@@ -1,12 +1,14 @@
 import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { Duplex } from "node:stream";
 import type { Browser, BrowserContext, Page } from "playwright";
 import { chromium } from "playwright";
 import type { Config } from "./config.js";
 import { BLOCKED_HEADER, EgressProxy } from "./egress-proxy.js";
+import { HttpError, SessionManager, type SessionLaunchOptions } from "./sessions.js";
 import { assertSafeUrl, publicAddressPolicy, UnsafeTargetError, type AddressPolicy } from "./security.js";
 
-const VERSION = "0.1.1";
+const VERSION = "0.2.0";
 const BODY_LIMIT = 64 * 1024;
 const TEXT_LIMIT = 250_000;
 const WAIT_STATES = new Set(["load", "domcontentloaded", "networkidle"]);
@@ -18,6 +20,8 @@ export interface BrowserGatewayOptions {
   launchOptions?: Parameters<typeof chromium.launch>[0];
   /** Overrides which resolved addresses are reachable. Intended for tests. */
   addressPolicy?: AddressPolicy;
+  /** How live sessions launch Chromium. */
+  sessionLaunch?: SessionLaunchOptions;
 }
 
 export class BrowserGateway {
@@ -29,10 +33,17 @@ export class BrowserGateway {
   private proxy?: EgressProxy;
   private proxyStarting?: Promise<EgressProxy>;
   private active = 0;
+  readonly sessions: SessionManager;
 
   constructor(options: BrowserGatewayOptions) {
     this.config = options.config;
     this.addressPolicy = options.addressPolicy ?? publicAddressPolicy;
+    this.sessions = new SessionManager({
+      config: this.config,
+      launch: options.sessionLaunch,
+      addressPolicy: this.addressPolicy,
+      resolveExecutable: () => chromium.executablePath(),
+    });
     this.browser = options.browser;
     this.injectedBrowser = options.browser;
     this.launchOptions = options.launchOptions;
@@ -64,6 +75,7 @@ export class BrowserGateway {
   }
 
   async stop(): Promise<void> {
+    await this.sessions.stopAll();
     if (this.browser && !this.injectedBrowser) await this.browser.close();
     await this.proxy?.stop();
   }
@@ -99,6 +111,7 @@ export class BrowserGateway {
       if (size > BODY_LIMIT) throw Object.assign(new Error("Request body is too large"), { status: 413 });
       chunks.push(buffer);
     }
+    if (size === 0) return {};
     let parsed: unknown;
     try {
       parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -186,6 +199,46 @@ export class BrowserGateway {
     }
   }
 
+  private connectBase(req: IncomingMessage): string {
+    const base = this.config.publicUrl ?? `${req.headers["x-forwarded-proto"] === "https" ? "https" : "http"}://${req.headers.host ?? `${this.config.host}:${this.config.port}`}`;
+    return base.replace(/^http/, "ws");
+  }
+
+  private async handleSessions(req: IncomingMessage, res: ServerResponse, method: string, path: string): Promise<void> {
+    const base = this.connectBase(req);
+    if (path === "/v1/sessions") {
+      if (method === "GET") {
+        this.json(res, 200, { sessions: this.sessions.list().map((session) => session.view(base)) });
+        return;
+      }
+      if (method === "POST") {
+        const session = await this.sessions.create(await this.body(req));
+        this.json(res, 201, session.view(base));
+        return;
+      }
+    }
+    const id = path.slice("/v1/sessions/".length);
+    const session = /^[0-9a-f-]{36}$/.test(id) ? this.sessions.get(id) : undefined;
+    if (session && method === "GET") {
+      this.json(res, 200, session.view(base));
+      return;
+    }
+    if (session && method === "DELETE") {
+      await session.close("requested");
+      this.json(res, 200, session.view());
+      return;
+    }
+    this.json(res, 404, { error: "not_found" });
+  }
+
+  /** Routes WebSocket upgrades. Call from the HTTP server's "upgrade" event. */
+  handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
+    socket.on("error", () => socket.destroy());
+    if (!this.sessions.handleUpgrade(req, socket, head)) {
+      socket.end("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    }
+  }
+
   async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const start = Date.now();
     const method = req.method || "GET";
@@ -200,7 +253,20 @@ export class BrowserGateway {
         return;
       }
       if (method === "GET" && path === "/v1/capabilities") {
-        this.json(res, 200, { version: VERSION, browser: "chromium", endpoints: ["/v1/content", "/v1/screenshot", "/v1/pdf"] });
+        this.json(res, 200, {
+          version: VERSION,
+          browser: "chromium",
+          endpoints: ["/v1/content", "/v1/screenshot", "/v1/pdf", "/v1/sessions", "/v1/usage"],
+          sessions: { enabled: this.config.maxSessions > 0, maxSessions: this.config.maxSessions, protocol: "cdp" },
+        });
+        return;
+      }
+      if (path === "/v1/usage" && method === "GET") {
+        this.json(res, 200, this.sessions.usage());
+        return;
+      }
+      if (path === "/v1/sessions" || path.startsWith("/v1/sessions/")) {
+        await this.handleSessions(req, res, method, path);
         return;
       }
       if (method !== "POST" || !["/v1/content", "/v1/screenshot", "/v1/pdf"].includes(path)) {
@@ -263,7 +329,8 @@ export class BrowserGateway {
       });
       res.end(result);
     } catch (error) {
-      const status = typeof error === "object" && error !== null && "status" in error
+      const status = error instanceof HttpError ? error.status
+        : typeof error === "object" && error !== null && "status" in error
         ? Number((error as { status: unknown }).status)
         : error instanceof UnsafeTargetError ? 403 : 502;
       const message = error instanceof UnsafeTargetError
