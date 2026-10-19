@@ -7,6 +7,7 @@ const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
 const gateway = new BrowserGateway({
   config,
   launchOptions: executablePath ? { executablePath } : undefined,
+  sessionLaunch: executablePath ? { executablePath } : undefined,
 });
 
 await gateway.start();
@@ -14,6 +15,7 @@ const server = createServer((req, res) => {
   void gateway.handle(req, res);
 });
 
+server.on("upgrade", (req, socket, head) => gateway.handleUpgrade(req, socket, head));
 server.requestTimeout = config.maxTimeoutMs + 5000;
 server.headersTimeout = 10000;
 server.listen(config.port, config.host, () => {

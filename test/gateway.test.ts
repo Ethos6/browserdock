@@ -106,7 +106,7 @@ async function call(path: string, body?: object, auth = true, base = gatewayUrl)
 test("health is public and does not expose the browser key", async () => {
   const response = await call("/healthz", undefined, false);
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { status: "ok", version: "0.1.1" });
+  assert.deepEqual(await response.json(), { status: "ok", version: "0.2.0" });
 });
 
 test("automation routes require authentication", async () => {

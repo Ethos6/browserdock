@@ -1,6 +1,6 @@
 {
   "name": "@ethos6/browserdock",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": false,
   "description": "A local-first, security-conscious Chromium automation gateway",
   "license": "MIT",
@@ -12,16 +12,18 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/server.js",
     "dev": "tsx src/server.ts",
-    "test": "npm run build && node --test dist/test/*.test.js",
+    "test": "npm run build && node --test --test-concurrency=1 dist/test/*.test.js",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "ipaddr.js": "2.2.0",
-    "playwright": "1.64.1"
+    "playwright": "1.64.1",
+    "ws": "8.22.0"
   },
   "devDependencies": {
     "@sparticuz/chromium": "153.0.0",
     "@types/node": "24.10.0",
+    "@types/ws": "8.18.1",
     "tsx": "4.20.6",
     "typescript": "5.9.3"
   }
