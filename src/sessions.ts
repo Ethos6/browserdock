@@ -120,7 +120,8 @@ class BrowserSession {
     });
     fromBrowser.on("data", (chunk: Buffer) => this.receive(chunk));
     child.once("exit", () => {
-      this.startup?.reject(new Error(`Chromium exited during startup: ${this.stderrTail.trim().split("\n").pop() ?? ""}`));
+      const lastLines = this.stderrTail.trim().split("\n").slice(-3).join(" | ");
+      this.startup?.reject(new Error(`Chromium exited during startup (code ${child.exitCode ?? child.signalCode}): ${lastLines}`));
       void this.close("browser_exited");
     });
     child.once("error", (error) => {

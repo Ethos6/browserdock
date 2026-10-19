@@ -333,7 +333,7 @@ export class BrowserGateway {
         : typeof error === "object" && error !== null && "status" in error
         ? Number((error as { status: unknown }).status)
         : error instanceof UnsafeTargetError ? 403 : 502;
-      const message = error instanceof UnsafeTargetError
+      const message = error instanceof UnsafeTargetError || error instanceof HttpError
         ? error.message
         : status < 500 && error instanceof Error ? error.message : "Browser request failed";
       if (!res.headersSent) this.json(res, status, { error: status === 429 ? "busy" : "request_failed", message });
