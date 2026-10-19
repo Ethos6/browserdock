@@ -8,7 +8,10 @@ export class UnsafeTargetError extends Error {
   }
 }
 
-function isPublicAddress(address: string): boolean {
+/** Decides whether the browser may connect to a resolved address and port. */
+export type AddressPolicy = (address: string, port: number) => boolean;
+
+export function isPublicAddress(address: string): boolean {
   try {
     const parsed = ipaddr.parse(address);
     if (parsed.kind() === "ipv6" && (parsed as ipaddr.IPv6).isIPv4MappedAddress()) {
@@ -20,7 +23,54 @@ function isPublicAddress(address: string): boolean {
   }
 }
 
-export async function assertSafeUrl(raw: string, allowPrivateNetworks = false): Promise<URL> {
+export const publicAddressPolicy: AddressPolicy = (address) => isPublicAddress(address);
+
+function stripBrackets(hostname: string): string {
+  return hostname.replace(/^\[|\]$/g, "").toLowerCase();
+}
+
+/**
+ * Resolves a hostname and returns one address the policy allows. Every resolved
+ * address must be allowed, so a name that mixes public and private records is rejected.
+ * Callers should connect to the returned address, not re-resolve the name.
+ */
+export async function resolveAllowedAddress(
+  rawHostname: string,
+  port: number,
+  policy: AddressPolicy = publicAddressPolicy,
+): Promise<string> {
+  const hostname = stripBrackets(rawHostname);
+  if (policy === publicAddressPolicy
+    && (hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local"))) {
+    throw new UnsafeTargetError();
+  }
+  if (ipaddr.isValid(hostname)) {
+    if (!policy(hostname, port)) throw new UnsafeTargetError();
+    return hostname;
+  }
+  let addresses: Array<{ address: string }>;
+  try {
+    addresses = await lookup(hostname, { all: true, verbatim: true });
+  } catch {
+    throw new UnsafeTargetError("Target hostname could not be resolved");
+  }
+  const first = addresses[0];
+  if (!first || addresses.some(({ address }) => !policy(address, port))) {
+    throw new UnsafeTargetError();
+  }
+  return first.address;
+}
+
+export function defaultPort(url: URL): number {
+  if (url.port) return Number(url.port);
+  return url.protocol === "https:" ? 443 : 80;
+}
+
+export async function assertSafeUrl(
+  raw: string,
+  allowPrivateNetworks = false,
+  policy: AddressPolicy = publicAddressPolicy,
+): Promise<URL> {
   let url: URL;
   try {
     url = new URL(raw);
@@ -36,24 +86,6 @@ export async function assertSafeUrl(raw: string, allowPrivateNetworks = false): 
   }
   if (allowPrivateNetworks) return url;
 
-  const hostname = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  if (hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local")) {
-    throw new UnsafeTargetError();
-  }
-
-  if (ipaddr.isValid(hostname)) {
-    if (!isPublicAddress(hostname)) throw new UnsafeTargetError();
-    return url;
-  }
-
-  let addresses: Array<{ address: string }>;
-  try {
-    addresses = await lookup(hostname, { all: true, verbatim: true });
-  } catch {
-    throw new UnsafeTargetError("Target hostname could not be resolved");
-  }
-  if (addresses.length === 0 || addresses.some(({ address }) => !isPublicAddress(address))) {
-    throw new UnsafeTargetError();
-  }
+  await resolveAllowedAddress(url.hostname, defaultPort(url), policy);
   return url;
 }

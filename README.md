@@ -125,11 +125,14 @@ it on localhost or a trusted private network. If you expose it remotely, use HTT
 secret managed outside source control, firewall rules, and a container/network policy that blocks
 private and metadata IP ranges.
 
-The service validates the destination hostname and resolved IPs for the initial navigation and
-browser subrequests. It blocks private, loopback, link-local, reserved, and non-HTTP(S) targets by
-default; disables service workers and downloads; closes page-created WebSockets; and strips proxy
-environment variables from the browser process. DNS-based checks alone cannot fully prevent DNS
-rebinding, so network egress rules remain important.
+All browser traffic goes through a built-in egress proxy that listens only on loopback. The proxy
+resolves every destination itself, checks the resolved address, and connects to exactly that
+address. Because Chromium makes a fresh proxy request for each redirect hop, subresource, frame and
+WebSocket, private, loopback, link-local, reserved and cloud-metadata addresses are blocked at every
+step, not only for the first URL, and a DNS answer cannot change between the check and the
+connection. BrowserDock also disables service workers and downloads, closes page-created WebSockets,
+rejects non-HTTP(S) URLs, and strips proxy environment variables from the browser process. Network
+egress rules are still recommended as a second layer.
 
 `BROWSERDOCK_ALLOW_PRIVATE_NETWORKS=true` disables destination IP blocking. Use it only for local
 development and never on an exposed service.

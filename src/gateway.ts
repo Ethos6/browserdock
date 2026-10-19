@@ -3,9 +3,10 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Browser, BrowserContext, Page } from "playwright";
 import { chromium } from "playwright";
 import type { Config } from "./config.js";
-import { assertSafeUrl, UnsafeTargetError } from "./security.js";
+import { BLOCKED_HEADER, EgressProxy } from "./egress-proxy.js";
+import { assertSafeUrl, publicAddressPolicy, UnsafeTargetError, type AddressPolicy } from "./security.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 const BODY_LIMIT = 64 * 1024;
 const TEXT_LIMIT = 250_000;
 const WAIT_STATES = new Set(["load", "domcontentloaded", "networkidle"]);
@@ -15,6 +16,8 @@ export interface BrowserGatewayOptions {
   config: Config;
   browser?: Browser;
   launchOptions?: Parameters<typeof chromium.launch>[0];
+  /** Overrides which resolved addresses are reachable. Intended for tests. */
+  addressPolicy?: AddressPolicy;
 }
 
 export class BrowserGateway {
@@ -22,16 +25,32 @@ export class BrowserGateway {
   private browser?: Browser;
   private readonly injectedBrowser?: Browser;
   private readonly launchOptions?: Parameters<typeof chromium.launch>[0];
+  private readonly addressPolicy: AddressPolicy;
+  private proxy?: EgressProxy;
+  private proxyStarting?: Promise<EgressProxy>;
   private active = 0;
 
   constructor(options: BrowserGatewayOptions) {
     this.config = options.config;
+    this.addressPolicy = options.addressPolicy ?? publicAddressPolicy;
     this.browser = options.browser;
     this.injectedBrowser = options.browser;
     this.launchOptions = options.launchOptions;
   }
 
+  private async egressProxy(): Promise<EgressProxy> {
+    if (this.proxy) return this.proxy;
+    this.proxyStarting ??= (async () => {
+      const proxy = new EgressProxy(this.addressPolicy);
+      await proxy.start();
+      this.proxy = proxy;
+      return proxy;
+    })();
+    return this.proxyStarting;
+  }
+
   async start(): Promise<void> {
+    if (!this.config.allowPrivateNetworks) await this.egressProxy();
     if (!this.browser) {
       const inheritedEnv = this.launchOptions?.env ?? process.env;
       const browserEnv: NodeJS.ProcessEnv = { ...inheritedEnv };
@@ -46,6 +65,7 @@ export class BrowserGateway {
 
   async stop(): Promise<void> {
     if (this.browser && !this.injectedBrowser) await this.browser.close();
+    await this.proxy?.stop();
   }
 
   private authorized(req: IncomingMessage): boolean {
@@ -53,8 +73,10 @@ export class BrowserGateway {
     const candidate = auth?.startsWith("Bearer ")
       ? auth.slice(7)
       : req.headers["x-api-key"];
-    if (typeof candidate !== "string" || candidate.length !== this.config.apiKey.length) return false;
-    return timingSafeEqual(Buffer.from(candidate), Buffer.from(this.config.apiKey));
+    if (typeof candidate !== "string") return false;
+    const supplied = Buffer.from(candidate);
+    const expected = Buffer.from(this.config.apiKey);
+    return supplied.length === expected.length && timingSafeEqual(supplied, expected);
   }
 
   private json(res: ServerResponse, status: number, value: unknown): void {
@@ -101,24 +123,37 @@ export class BrowserGateway {
     if (this.active >= this.config.maxConcurrent) {
       throw Object.assign(new Error("Browser capacity is full; retry shortly"), { status: 429 });
     }
-    if (!this.browser) throw Object.assign(new Error("Browser is starting"), { status: 503 });
-    const target = body.url;
-    if (typeof target !== "string" || target.length > 4096) {
-      throw Object.assign(new Error("url must be a string of at most 4096 characters"), { status: 400 });
-    }
-    const timeout = this.timeout(body);
-    await assertSafeUrl(target, this.config.allowPrivateNetworks);
-    const waitUntil = typeof body.waitUntil === "string" && WAIT_STATES.has(body.waitUntil)
-      ? body.waitUntil as "load" | "domcontentloaded" | "networkidle"
-      : "domcontentloaded";
-
+    // Reserve the slot before any await so parallel requests cannot exceed the limit.
     this.active += 1;
     let context: BrowserContext | undefined;
     try {
-      context = await this.browser.newContext({ acceptDownloads: false, serviceWorkers: "block" });
+      const browser = this.browser;
+      if (!browser) throw Object.assign(new Error("Browser is starting"), { status: 503 });
+      const target = body.url;
+      if (typeof target !== "string" || target.length > 4096) {
+        throw Object.assign(new Error("url must be a string of at most 4096 characters"), { status: 400 });
+      }
+      const timeout = this.timeout(body);
+      const allowPrivate = this.config.allowPrivateNetworks;
+      await assertSafeUrl(target, allowPrivate, this.addressPolicy);
+      const waitUntil = typeof body.waitUntil === "string" && WAIT_STATES.has(body.waitUntil)
+        ? body.waitUntil as "load" | "domcontentloaded" | "networkidle"
+        : "domcontentloaded";
+
+      const proxy = allowPrivate ? undefined : await this.egressProxy();
+      context = await browser.newContext({
+        acceptDownloads: false,
+        serviceWorkers: "block",
+        // All traffic, including redirect hops, goes through the egress proxy, which checks
+        // the address it actually connects to. "<-loopback>" stops Chromium from bypassing
+        // the proxy for localhost.
+        proxy: proxy
+          ? { server: proxy.url, bypass: "<-loopback>", username: proxy.username, password: proxy.password }
+          : undefined,
+      });
       await context.route("**/*", async (route) => {
         try {
-          await assertSafeUrl(route.request().url(), this.config.allowPrivateNetworks);
+          await assertSafeUrl(route.request().url(), allowPrivate, this.addressPolicy);
           await route.continue();
         } catch {
           await route.abort("blockedbyclient").catch(() => undefined);
@@ -128,8 +163,19 @@ export class BrowserGateway {
       const page = await context.newPage();
       page.setDefaultTimeout(timeout);
       page.setDefaultNavigationTimeout(timeout);
-      const response = await page.goto(target, { waitUntil, timeout });
+      let response;
+      try {
+        response = await page.goto(target, { waitUntil, timeout });
+      } catch (error) {
+        if (error instanceof Error && /ERR_TUNNEL_CONNECTION_FAILED|ERR_BLOCKED_BY_CLIENT/.test(error.message)) {
+          throw new UnsafeTargetError("The target or one of its redirects is blocked by the network policy or unreachable");
+        }
+        throw error;
+      }
       if (!response) throw Object.assign(new Error("Navigation did not return a response"), { status: 502 });
+      if (response.headers()[BLOCKED_HEADER]) {
+        throw new UnsafeTargetError("A redirect led to a target blocked by the network policy");
+      }
       if (response.status() >= 400) {
         throw Object.assign(new Error(`Target returned HTTP ${response.status()}`), { status: 502 });
       }

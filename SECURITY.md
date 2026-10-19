@@ -8,6 +8,8 @@
 - Each request gets a new browser context, with downloads and service workers disabled.
 - Navigation and subresource requests are limited to HTTP(S). Local, private, link-local,
   loopback, and reserved IP ranges are blocked unless explicitly enabled for development.
+- Every connection the browser makes, including each redirect hop, passes through a loopback-only
+  egress proxy that checks the resolved IP address and connects to that exact address.
 - WebSocket connections opened by pages are closed.
 - Browser concurrency, request size, and navigation time are bounded.
 
@@ -15,8 +17,8 @@
 
 Keep the service behind a trusted network boundary. Do not expose it directly to the public
 internet without TLS, network egress controls, and an API key managed by a secret store. The
-hostname checks reduce common SSRF paths but are not a substitute for firewall or container
-network policy, especially in environments vulnerable to DNS rebinding.
+egress proxy blocks SSRF through redirects and DNS rebinding, but it is not a substitute for
+firewall or container network policy.
 
 ## Reporting a vulnerability
 
