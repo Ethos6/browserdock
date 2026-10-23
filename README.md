@@ -1,5 +1,7 @@
 # BrowserDock
 
+![BrowserDock logo](assets/browserdock-mark.svg)
+
 **Self-hosted headless browsers as a service, with secure defaults and an MIT license.**
 
 BrowserDock runs headless Chromium on your own machine or server and offers it two ways:
@@ -23,6 +25,24 @@ BrowserDock runs headless Chromium on your own machine or server and offers it t
 
 BrowserDock is deliberately small. It supports Chromium only and does not do stealth
 fingerprinting, CAPTCHA solving, residential proxies, persistent profiles or crawling.
+
+## How it works
+
+The API authenticates the request and validates its limits before starting work. Live sessions run in isolated Chromium processes and expose a CDP endpoint; one-shot rendering uses a fresh browser context. Browser egress passes through the SSRF filter, and the requested page content or capture is returned before the context is closed.
+
+```mermaid
+flowchart TD
+    A[Client request] --> B[API key and limits check]
+    B --> C{Request type}
+    C -->|Live session| D[Start isolated Chromium]
+    C -->|Render| E[Create fresh browser context]
+    D --> F[CDP client controls browser]
+    E --> G[Navigate and capture result]
+    F --> H[Filtered egress proxy]
+    G --> H
+    H --> I[Return output and usage]
+    I --> J[Close session or context]
+```
 
 ## Quick start with Docker
 
