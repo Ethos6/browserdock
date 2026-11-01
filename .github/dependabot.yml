@@ -1,10 +1,10 @@
-# Keeps dependencies current: weekly pull requests for npm packages, GitHub Actions and Docker base images.
+# Keeps dependencies current: monthly pull requests for npm packages, GitHub Actions and Docker base images.
 version: 2
 updates:
   - package-ecosystem: npm
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
     open-pull-requests-limit: 5
     groups:
       npm-dependencies:
@@ -12,11 +12,11 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
     groups:
       actions:
         patterns: ["*"]
   - package-ecosystem: docker
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
